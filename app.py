@@ -121,3 +121,66 @@ if __name__ == '__main__':
             print("\nTop 10 Trending Topics (by monthly count):")
             # Sort to see the keywords with the highest counts in a single month
             print(monthly_topic_df.sort_values('count', ascending=False).head(10))
+
+from sklearn.ensemble import IsolationForest
+
+def calculate_momentum_features(df):
+    """
+    Calculates momentum features (velocity and acceleration) for each topic.
+    """
+    # Sort by keyword and date to ensure correct calculation
+    df = df.sort_values(by=['keyword', 'pubdate'])
+    
+    # Calculate Velocity: the month-over-month change in publication count
+    # .diff() calculates the difference from the previous row
+    df['velocity'] = df.groupby('keyword')['count'].diff().fillna(0)
+    
+    # Calculate Acceleration: the month-over-month change in velocity
+    df['acceleration'] = df.groupby('keyword')['velocity'].diff().fillna(0)
+    
+    print("Momentum features calculated.")
+    return df
+
+def find_anomalous_topics(df):
+    """
+    Uses an Isolation Forest model to find topics with anomalous momentum.
+    """
+    # Select the features for the model
+    features = df[['count', 'velocity', 'acceleration']]
+    
+    # Initialize and fit the model
+    # Contamination='auto' is a good starting point for this algorithm
+    model = IsolationForest(contamination='auto', random_state=42)
+    model.fit(features)
+    
+    # Predict the outliers (-1 for anomalies, 1 for inliers)
+    df['anomaly_score'] = model.decision_function(features)
+    df['is_anomaly'] = model.predict(features)
+    
+    print("Anomaly detection complete.")
+    
+    # Filter for the anomalies and sort by score
+    anomalies = df[df['is_anomaly'] == -1].sort_values(by='anomaly_score')
+    
+    return anomalies
+
+# --- Main execution ---
+if __name__ == '__main__':
+    search_query = 'black hole OR gravitational wave year:2020-2025'
+    
+    raw_papers_df = fetch_ads_data(query=search_query, rows=2000)
+
+    if raw_papers_df is not None:
+        prepared_df = clean_and_prepare_data(raw_papers_df)
+        monthly_topic_df = create_monthly_topic_counts(prepared_df)
+        
+        # Step 4: Calculate momentum features
+        momentum_df = calculate_momentum_features(monthly_topic_df)
+        
+        # Step 5: Find the emerging, anomalous topics
+        emerging_topics = find_anomalous_topics(momentum_df)
+        
+        if not emerging_topics.empty:
+            print("\n--- Emerging Topic Forecast ---")
+            print("The following topics are showing anomalous growth patterns:")
+            print(emerging_topics[['keyword', 'pubdate', 'count', 'velocity', 'acceleration', 'anomaly_score']])
