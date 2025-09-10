@@ -1,186 +1,129 @@
 import os
 import requests
 import pandas as pd
+import streamlit as st
+import plotly.express as px
 from dotenv import load_dotenv
-
-# Load the environment variables from the .env file
-load_dotenv()
-ADS_API_KEY = os.getenv('ADS_API_KEY')
-
-def fetch_ads_data(query, rows=100):
-    """
-    Fetches data from the NASA ADS API for a given query.
-    """
-    headers = {
-        'Authorization': f'Bearer {ADS_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    
-    # Define the fields you want to retrieve
-    # 'title', 'author', 'year', 'pubdate', 'abstract', 'keyword', 'citation_count'
-    fields = "title,author,year,pubdate,abstract,keyword,citation_count"
-
-    # Define the query parameters
-    params = {
-        'q': query,
-        'fl': fields,
-        'rows': rows,
-        'sort': 'date desc' # Get the most recent papers first
-    }
-
-    try:
-        response = requests.get('https://api.adsabs.harvard.edu/v1/search/query', headers=headers, params=params)
-        response.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
-
-        # Get the JSON data from the response
-        results = response.json()
-        docs = results.get('response', {}).get('docs', [])
-
-        # Convert the list of paper dictionaries into a Pandas DataFrame
-        df = pd.DataFrame(docs)
-        
-        print(f"Successfully fetched {len(df)} papers.")
-        return df
-
-    except requests.exceptions.RequestException as e:
-        print(f"An error occurred: {e}")
-        return None
-
-# --- Main execution ---
-if __name__ == '__main__':
-    # Define your search query
-    # Example: Search for papers about exoplanets published in the last year
-    search_query = 'exoplanet year:2024-2025'
-    
-    papers_df = fetch_ads_data(query=search_query, rows=200)
-
-    if papers_df is not None:
-        # Print the first 5 rows of the DataFrame to see the results
-        print("\nFirst 5 papers:")
-        print(papers_df.head())
-
-        # Print the columns to see what data we got
-        print("\nAvailable columns:")
-        print(papers_df.columns)
-
-def clean_and_prepare_data(df):
-    """
-    Cleans the raw DataFrame from the API.
-    - Converts pubdate to datetime objects.
-    - Handles missing keywords.
-    - Explodes the DataFrame so each keyword has its own row.
-    """
-    # Make a copy to avoid changing the original DataFrame
-    df_clean = df.copy()
-    
-    # Convert 'pubdate' to datetime objects for time-series analysis
-    df_clean['pubdate'] = pd.to_datetime(df_clean['pubdate'])
-    
-    # Drop rows where there is no abstract or no keywords, as they are not useful for our analysis
-    df_clean.dropna(subset=['abstract', 'keyword'], inplace=True)
-    
-    # Explode the 'keyword' column
-    # If a paper has ['A', 'B'], it becomes two rows: one for A, one for B
-    df_clean = df_clean.explode('keyword')
-    
-    # Clean up the keyword strings (lowercase, strip whitespace)
-    df_clean['keyword'] = df_clean['keyword'].str.lower().str.strip()
-    
-    print("Data cleaning and preparation complete.")
-    return df_clean
-
-def create_monthly_topic_counts(df):
-    """
-    Aggregates the data to get a monthly count for each keyword.
-    """
-    # Set the publication date as the index for time-series resampling
-    df.set_index('pubdate', inplace=True)
-    
-    # Group by keyword, then resample by month and count the occurrences
-    # 'M' stands for Month End frequency
-    monthly_counts = df.groupby('keyword').resample('M').size().rename('count').reset_index()
-    
-    print("Monthly topic counts created.")
-    return monthly_counts
-
-
-# --- Main execution ---
-if __name__ == '__main__':
-    search_query = 'exoplanet year:2024-2025'
-    
-    raw_papers_df = fetch_ads_data(query=search_query, rows=1000) # Increased rows for better analysis
-
-    if raw_papers_df is not None:
-        # Step 2: Clean and prepare the data
-        prepared_df = clean_and_prepare_data(raw_papers_df)
-
-        # Step 3: Create the monthly time-series of topic counts
-        monthly_topic_df = create_monthly_topic_counts(prepared_df)
-        
-        if not monthly_topic_df.empty:
-            print("\nTop 10 Trending Topics (by monthly count):")
-            # Sort to see the keywords with the highest counts in a single month
-            print(monthly_topic_df.sort_values('count', ascending=False).head(10))
-
 from sklearn.ensemble import IsolationForest
 
-def calculate_momentum_features(df):
-    """
-    Calculates momentum features (velocity and acceleration) for each topic.
-    """
-    # Sort by keyword and date to ensure correct calculation
-    df = df.sort_values(by=['keyword', 'pubdate'])
-    
-    # Calculate Velocity: the month-over-month change in publication count
-    # .diff() calculates the difference from the previous row
-    df['velocity'] = df.groupby('keyword')['count'].diff().fillna(0)
-    
-    # Calculate Acceleration: the month-over-month change in velocity
-    df['acceleration'] = df.groupby('keyword')['velocity'].diff().fillna(0)
-    
-    print("Momentum features calculated.")
-    return df
+# --- Configuration and Setup ---
+load_dotenv()
+ADS_API_KEY = os.getenv('ADS_API_KEY')
+st.set_page_config(layout="wide") # Use a wider layout for the dashboard
 
-def find_anomalous_topics(df):
-    """
-    Uses an Isolation Forest model to find topics with anomalous momentum.
-    """
-    # Select the features for the model
-    features = df[['count', 'velocity', 'acceleration']]
-    
-    # Initialize and fit the model
-    # Contamination='auto' is a good starting point for this algorithm
-    model = IsolationForest(contamination='auto', random_state=42)
-    model.fit(features)
-    
-    # Predict the outliers (-1 for anomalies, 1 for inliers)
-    df['anomaly_score'] = model.decision_function(features)
-    df['is_anomaly'] = model.predict(features)
-    
-    print("Anomaly detection complete.")
-    
-    # Filter for the anomalies and sort by score
-    anomalies = df[df['is_anomaly'] == -1].sort_values(by='anomaly_score')
-    
-    return anomalies
+# --- Data Caching and Fetching ---
+# CHANGE 1: Caching for Performance
+# This decorator tells Streamlit to store the results of this function.
+# If the same function is called with the same inputs, it returns the cached data
+# instead of fetching from the API again, making the app much faster.
+@st.cache_data
+def fetch_ads_data(query: str, rows: int) -> pd.DataFrame | None:
+    """Fetches data from the NASA ADS API."""
+    headers = {'Authorization': f'Bearer {ADS_API_KEY}'}
+    fields = "title,author,year,pubdate,abstract,citation_count"
+    params = {'q': query, 'fl': fields, 'rows': rows, 'sort': 'date desc'}
+    try:
+        response = requests.get('https://api.adsabs.harvard.edu/v1/search/query', headers=headers, params=params)
+        response.raise_for_status()
+        docs = response.json().get('response', {}).get('docs', [])
+        return pd.DataFrame(docs)
+    except requests.exceptions.RequestException as e:
+        st.error(f"API Request Failed: {e}")
+        return None
 
-# --- Main execution ---
-if __name__ == '__main__':
-    search_query = 'black hole OR gravitational wave year:2020-2025'
+# --- Analysis Pipeline Functions ---
+# CHANGE 2: Robust Topic Assignment Logic
+def process_data(df: pd.DataFrame, query_terms: list[str]) -> pd.DataFrame:
+    """Cleans data and assigns topics based on query terms in title/abstract."""
+    df_clean = df.copy()
+    df_clean['pubdate'] = pd.to_datetime(df_clean['pubdate'], errors='coerce')
+    df_clean.dropna(subset=['pubdate', 'abstract', 'title'], inplace=True)
     
-    raw_papers_df = fetch_ads_data(query=search_query, rows=2000)
+    df_clean['text_for_search'] = df_clean['title'].str.lower() + " " + df_clean['abstract'].str.lower()
+    
+    topics = [
+        [term for term in query_terms if term in text] 
+        for text in df_clean['text_for_search']
+    ]
+    df_clean['topics'] = topics
+    
+    df_clean = df_clean[df_clean['topics'].apply(len) > 0].explode('topics')
+    return df_clean
 
-    if raw_papers_df is not None:
-        prepared_df = clean_and_prepare_data(raw_papers_df)
-        monthly_topic_df = create_monthly_topic_counts(prepared_df)
+def analyze_trends(df: pd.DataFrame) -> pd.DataFrame:
+    """Runs the full trend analysis pipeline on the processed data."""
+    # 1. Create monthly counts
+    df.set_index('pubdate', inplace=True)
+    monthly_counts = df.groupby('topics').resample('M').size().rename('count').reset_index()
+    
+    # 2. Calculate momentum features
+    monthly_counts = monthly_counts.sort_values(by=['topics', 'pubdate'])
+    monthly_counts['velocity'] = monthly_counts.groupby('topics')['count'].diff().fillna(0)
+    monthly_counts['acceleration'] = monthly_counts.groupby('topics')['velocity'].diff().fillna(0)
+    
+    # 3. Find anomalies
+    all_anomalies = []
+    for topic, group in monthly_counts.groupby('topics'):
+        if len(group) < 2: continue
+        features = group[['count', 'velocity', 'acceleration']]
+        model = IsolationForest(contamination='auto', random_state=42)
+        model.fit(features)
         
-        # Step 4: Calculate momentum features
-        momentum_df = calculate_momentum_features(monthly_topic_df)
+        group['anomaly_score'] = model.decision_function(features)
+        group['is_anomaly'] = model.predict(features)
         
-        # Step 5: Find the emerging, anomalous topics
-        emerging_topics = find_anomalous_topics(momentum_df)
+        anomalies = group[group['is_anomaly'] == -1]
+        all_anomalies.append(anomalies)
+
+    if not all_anomalies: return pd.DataFrame()
+    return pd.concat(all_anomalies).sort_values(by='anomaly_score')
+
+# --- Streamlit User Interface ---
+
+st.title("Astropare 🌠")
+st.write("An engine to forecast emerging research trends in astrophysics by detecting anomalous growth in publication volume.")
+
+# Sidebar for controls
+st.sidebar.header("Controls")
+search_query_input = st.sidebar.text_input(
+    "Search Query",
+    'jwst year:2020-2025'
+)
+num_rows = st.sidebar.slider("Number of papers to fetch", 500, 2000, 1500, 100)
+
+if st.sidebar.button("Analyze Trends"):
+    if not search_query_input:
+        st.warning("Please enter a search query.")
+    else:
+        query_terms = [term.lower() for term in search_query_input.split() if 'year:' not in term and term.lower() not in ['or', 'and']]
         
-        if not emerging_topics.empty:
-            print("\n--- Emerging Topic Forecast ---")
-            print("The following topics are showing anomalous growth patterns:")
-            print(emerging_topics[['keyword', 'pubdate', 'count', 'velocity', 'acceleration', 'anomaly_score']])
+        raw_papers_df = fetch_ads_data(query=search_query_input, rows=num_rows)
+        
+        if raw_papers_df is not None and not raw_papers_df.empty:
+            st.success(f"Successfully fetched and cached {len(raw_papers_df)} papers.")
+            
+            processed_df = process_data(raw_papers_df, query_terms)
+            emerging_topics = analyze_trends(processed_df)
+            
+            st.subheader("🚀 Emerging Topic Forecast")
+            
+            if not emerging_topics.empty:
+                st.write("The following monthly data points show anomalous growth patterns:")
+                display_cols = ['topics', 'pubdate', 'count', 'velocity', 'acceleration', 'anomaly_score']
+                st.dataframe(emerging_topics[display_cols])
+
+                # CHANGE 3: Interactive Visualization
+                st.subheader("Visualize a Trend")
+                topic_to_plot = st.selectbox("Select a topic to visualize its timeline:", options=emerging_topics['topics'].unique())
+                
+                if topic_to_plot:
+                    # Get all data for the selected topic, not just the anomalies
+                    topic_timeline = processed_df[processed_df['topics'] == topic_to_plot]
+                    monthly_timeline = topic_timeline.set_index('pubdate').resample('M').size().rename('count').reset_index()
+                    
+                    fig = px.line(monthly_timeline, x='pubdate', y='count', title=f"Publication Timeline for '{topic_to_plot}'")
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No anomalous trends were detected. Try a broader query or date range.")
+        else:
+            st.error("Could not retrieve or process data.")
