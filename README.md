@@ -1,5 +1,5 @@
 Astropare: Predictive Trend Forecasting for Astrophysical Research
-Live Application: your-streamlit-app-url.streamlit.app
+Live Application: https://astropare.streamlit.app/
 
 Astropare is an end-to-end data science application that ingests publication data from the NASA Astrophysics Data System (ADS), engineers time-series momentum features, and leverages an unsupervised machine learning model to forecast emerging research trends.
 
